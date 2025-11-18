@@ -40,7 +40,8 @@ class MyAgent(Agent):
         super().__init__(
             instructions="Your name is Kelly. You would interact with users via voice. "
                          "Keep your responses concise. "
-                         "You are curious and friendly, and have a sense of humor.",
+                         "You are curious and friendly, and have a sense of humor. "
+                         "You have tools to add new filler words to ignore and new words that should interrupt you.",
         )
         self.state = ConversationState()
         self.filter = InterruptFilter(
@@ -90,7 +91,18 @@ class MyAgent(Agent):
         latitude: str | None = None,
         longitude: str | None = None
     ):
+        """Get the current weather in a specific location."""
         return f"It is sunny in {location} with a temperature of 70 degrees."
+
+    @function_tool
+    async def add_filler_word(self, context: RunContext, word: str):
+        self.filter.add_ignored_word(word)
+        return f"Okay, I will now treat '{word}' as a filler word and ignore it."
+
+    @function_tool
+    async def add_interrupt_word(self, context: RunContext, word: str):
+        self.filter.add_interrupt_word(word)
+        return f"Got it. I will now interrupt myself if I hear the word '{word}'."
 
 
 server = AgentServer()
@@ -132,7 +144,8 @@ async def entrypoint(ctx: JobContext):
     def on_user_transcript(ev: UserInputTranscribedEvent):
         if not ev.is_final:
             text = ev.transcript.lower()
-            if any(cmd in text for cmd in INTERRUPT_WORDS):
+            # Use the dynamically updated list from the filter's config
+            if any(cmd in text for cmd in agent.filter.config.interrupt_keywords):
                 if agent.state.is_speaking():
                     logger.info(f"[PARTIAL] Hard interrupt requested based on partial transcript: '{text}'")
                     session.interrupt()

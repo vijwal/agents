@@ -72,6 +72,13 @@ class InterruptFilter:
         w = word.strip().lower()
         if w not in self.config.ignored_words:
             self.config.ignored_words.append(w)
+            logger.info(f"Added '{w}' to ignored words. Current list: {self.config.ignored_words}")
+            
+    def add_interrupt_word(self, word: str):
+        w = word.strip().lower()
+        if w not in self.config.interrupt_keywords:
+            self.config.interrupt_keywords.append(w)
+            logger.info(f"Added '{w}' to interrupt words. Current list: {self.config.interrupt_keywords}")
 
     def update_ignored_words(self, new_list: List[str]):
         self.config.ignored_words = [w.strip().lower() for w in new_list]
