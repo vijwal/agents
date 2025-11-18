@@ -12,7 +12,7 @@ No modifications were made to the underlying LiveKit SDK. All logic is contained
 The following changes were added inside `examples/voiceagent/`:
 
 * `interrupt_filter.py`
-    See [interrupt_filter.py](examples/voiceagent/interrupt_filter.py)
+    See [interrupt_filter.py](examples/voice_agent/interrupt_filter.py)
 
   * Filters ASR transcripts in real time.
   * Distinguishes between filler-only segments and meaningful interruptions.
@@ -20,7 +20,7 @@ The following changes were added inside `examples/voiceagent/`:
   * Logs ignored fillers vs. accepted interruptions separately.
 
 * `real_interrupt_agent.py`
-    See [real_interrupt_agent.py](examples/voiceagent/real_interrupt_agent.py)
+    See [real_interrupt_agent.py](examples/voice_agent/real_interrupt_agent.py)
 
   * Integrates the filter into the LiveKit event loop.
   * Over writes on_user_turn_completed() fn to make this happen.
