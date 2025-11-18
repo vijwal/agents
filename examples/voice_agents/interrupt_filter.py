@@ -3,6 +3,7 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import List
 import asyncio
+import string
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,15 @@ class InterruptFilter:
             return InterruptDecision.IGNORE
 
         text_norm = text.lower().strip()
-        tokens = text_norm.split()
+        tokens = [t.strip(string.punctuation) for t in text_norm.split()]
+
+        if all(t in self.config.ignored_words for t in tokens):
+            logger.info(f"Ignoring filler: {text}")
+            return InterruptDecision.IGNORE
+
+        if any(t in self.config.interrupt_keywords for t in tokens):
+            logger.info(f"Detected interruption keyword: {text}")
+            return InterruptDecision.INTERRUPT
 
         if not self.state.is_speaking():
             return InterruptDecision.ALLOW
@@ -52,15 +61,12 @@ class InterruptFilter:
             logger.info(f"Ignoring low-confidence: '{text}'")
             return InterruptDecision.IGNORE
 
-        if any(t in self.config.interrupt_keywords for t in tokens):
-            logger.info(f"Detected interruption keyword: {text}")
-            return InterruptDecision.INTERRUPT
-
-        if all(t in self.config.ignored_words for t in tokens):
-            logger.info(f"Ignoring filler while speaking: {text}")
-            return InterruptDecision.IGNORE
-
         return InterruptDecision.INTERRUPT
+
+    def decide_sync(self, text, confidence):
+        return asyncio.get_event_loop().run_until_complete(
+            self.decide(text, confidence)
+        )
 
     def add_ignored_word(self, word: str):
         w = word.strip().lower()

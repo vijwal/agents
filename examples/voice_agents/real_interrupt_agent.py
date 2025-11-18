@@ -1,6 +1,7 @@
 import logging
-
+import asyncio
 from dotenv import load_dotenv
+import string
 
 from livekit.agents import (
     Agent,
@@ -13,88 +14,83 @@ from livekit.agents import (
     cli,
     metrics,
     room_io,
+    llm,
+    AgentStateChangedEvent,
+    UserInputTranscribedEvent,
 )
-from livekit.agents.llm import function_tool
-from livekit.plugins import silero
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
-
-# uncomment to enable Krisp background voice/noise cancellation
-# from livekit.plugins import noise_cancellation
+import os
+from livekit.agents.llm import function_tool, StopResponse
+from livekit.plugins import silero, groq, cartesia
 
 logger = logging.getLogger("basic-agent")
-
+logger.setLevel(logging.INFO)
 load_dotenv()
 
 from interrupt_filter import InterruptFilter, InterruptFilterConfig, ConversationState, InterruptDecision
 
+def load_list(name: str):
+    raw = os.getenv(name, "")
+    return [w.strip().lower() for w in raw.split(",") if w.strip()]
+
+
+IGNORED_WORDS = load_list("IGNORED_WORDS")
+INTERRUPT_WORDS = load_list("INTERRUPT_WORDS")
 class MyAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="Your name is Kelly. You would interact with users via voice."
-            "with that in mind keep your responses concise and to the point."
-            "do not use emojis, asterisks, markdown, or other special characters in your responses."
-            "You are curious and friendly, and have a sense of humor."
-            "you will speak english to the user",
+            instructions="Your name is Kelly. You would interact with users via voice. "
+                         "Keep your responses concise. "
+                         "You are curious and friendly, and have a sense of humor.",
         )
-
         self.state = ConversationState()
         self.filter = InterruptFilter(
             InterruptFilterConfig(
-                ignored_words=["uh","uhh" "umm", "um", "hmm", "haan", "huh", "hmmmmm", "hmmm", "ah", "oh", "hmmhmm", "mmm", "mm", "eh", "arey", "accha", "acha", "haanji"],
-                interrupt_keywords=["stop", "wait", "hold on", "hold", "pause", "one sec", "one second", "no", "not that", "listen"],
+                ignored_words=IGNORED_WORDS,
+                interrupt_keywords=INTERRUPT_WORDS,
                 min_confidence=0.5,
             ),
             self.state,
         )
 
     async def on_enter(self):
-        # when the agent is added to the session, it'll generate a reply
-        # according to its instructions
+        logger.info("Agent session initialized")
         self.session.generate_reply()
 
-    async def on_tts_started(self):
-        await self.state.set_speaking(True)
+    async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage):
+        text = new_message.text_content or ""
+        confidence = getattr(new_message, "transcript_confidence", 1.0)
 
-    async def on_tts_finished(self):
-        await self.state.set_speaking(False)
-
-    async def on_transcription(self, text, is_final, confidence):
-        logger.info(f"[InterruptCheck] text='{text}' conf={confidence}")
+        logger.info(f"[INTERCEPT] User final transcript: '{text}'")
 
         decision = self.filter.decide(text, confidence)
 
         if decision == InterruptDecision.IGNORE:
-            logger.info("[InterruptCheck] IGNORE")
+            logger.info("[INTERCEPT] Decision: IGNORE ")
             return None
 
         if decision == InterruptDecision.INTERRUPT:
-            logger.info("[InterruptCheck] INTERRUPT → stopping TTS")
-            await self.session.stop_tts()
-            return text
+            logger.info("[INTERCEPT] Decision: INTERRUPT")
 
-        logger.info("[InterruptCheck] ALLOW")
-        return text
+            clean_text = text.strip(string.punctuation).lower()
 
-    # all functions annotated with @function_tool will be passed to the LLM when this
-    # agent is active
+            if any(cmd in clean_text for cmd in self.filter.config.interrupt_keywords):
+                logger.info("[INTERCEPT] User explicitly requested silence")
+                self.session.interrupt()
+                logger.info("[INTERCEPT] Interrupt applied successfully")
+                raise StopResponse()
+
+        logger.info("[INTERCEPT] Decision: ALLOW (processing user turn)")
+        await super().on_user_turn_completed(turn_ctx, new_message)
+
     @function_tool
     async def lookup_weather(
-        self, context: RunContext, location: str, latitude: str, longitude: str
+        self,
+        context: RunContext,
+        location: str,
+        latitude: str | None = None,
+        longitude: str | None = None
     ):
-        """Called when the user asks for weather related information.
-        Ensure the user's location (city or region) is provided.
-        When given a location, please estimate the latitude and longitude of the location and
-        do not ask the user for them.
-
-        Args:
-            location: The location they are asking for
-            latitude: The latitude of the location, do not ask user for it
-            longitude: The longitude of the location, do not ask user for it
-        """
-
-        logger.info(f"Looking up weather for {location}")
-
-        return "sunny with a temperature of 70 degrees."
+        return f"It is sunny in {location} with a temperature of 70 degrees."
 
 
 server = AgentServer()
@@ -109,58 +105,39 @@ server.setup_fnc = prewarm
 
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
-    # each log entry will include these fields
-    ctx.log_context_fields = {
-        "room": ctx.room.name,
-    }
+    ctx.log_context_fields = {"room": ctx.room.name}
+    logger.info(f"Connected to room: {ctx.room.name}")
+
     session = AgentSession(
-        # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
-        # See all available models at https://docs.livekit.io/agents/models/stt/
         stt="deepgram/nova-3",
-        # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
-        # See all available models at https://docs.livekit.io/agents/models/llm/
-        llm="openai/gpt-4.1-mini",
-        # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
-        # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
+        llm=groq.LLM(model="llama-3.1-8b-instant"),
         tts="cartesia/sonic-2:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
-        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
-        # See more at https://docs.livekit.io/agents/build/turns
-        turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
-        # allow the LLM to generate a response while waiting for the end of turn
-        # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
-        preemptive_generation=True,
-        # sometimes background noise could interrupt the agent session, these are considered false positive interruptions
-        # when it's detected, you may resume the agent's speech
-        resume_false_interruption=True,
-        false_interruption_timeout=1.0,
+        min_interruption_words=1,
+        preemptive_generation=False,
     )
 
-    # log metrics as they are emitted, and total usage after session is over
-    usage_collector = metrics.UsageCollector()
+    agent = MyAgent()
 
-    @session.on("metrics_collected")
-    def _on_metrics_collected(ev: MetricsCollectedEvent):
-        metrics.log_metrics(ev.metrics)
-        usage_collector.collect(ev.metrics)
+    @session.on("agent_state_changed")
+    def on_agent_state(ev: AgentStateChangedEvent):
+        if ev.new_state == "speaking":
+            asyncio.create_task(agent.state.set_speaking(True))
+            logger.info("[TTS] Agent started speaking")
+        elif ev.new_state in ("listening", "thinking") and ev.old_state == "speaking":
+            asyncio.create_task(agent.state.set_speaking(False))
+            logger.info("[TTS] Agent stopped speaking")
 
-    async def log_usage():
-        summary = usage_collector.get_summary()
-        logger.info(f"Usage: {summary}")
+    @session.on("user_input_transcribed")
+    def on_user_transcript(ev: UserInputTranscribedEvent):
+        if not ev.is_final:
+            text = ev.transcript.lower()
+            if any(cmd in text for cmd in INTERRUPT_WORDS):
+                if agent.state.is_speaking():
+                    logger.info(f"[PARTIAL] Hard interrupt requested based on partial transcript: '{text}'")
+                    session.interrupt()
 
-    # shutdown callbacks are triggered when the session is over
-    ctx.add_shutdown_callback(log_usage)
-
-    await session.start(
-        agent=MyAgent(),
-        room=ctx.room,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(
-                # uncomment to enable the Krisp BVC noise cancellation
-                # noise_cancellation=noise_cancellation.BVC(),
-            ),
-        ),
-    )
+    await session.start(agent=agent, room=ctx.room)
 
 
 if __name__ == "__main__":
